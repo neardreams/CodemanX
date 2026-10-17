@@ -2175,11 +2175,10 @@ Object.assign(CodemanApp.prototype, {
       btn.innerHTML = btn.dataset.origHtml;
       delete btn.dataset.origHtml;
       btn.classList.remove('confirming');
-      fetch(`/api/sessions/${this.activeSessionId}/input`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input: '\x03' })
-      });
+      // Same durable path as every other keystroke: a Ctrl+C dropped on a
+      // half-open socket would leave the CLI running with no retry and no
+      // error (fork issue #1 — the accessory keys' bare fetch).
+      this._sendInputAsync(this.activeSessionId, '\x03');
     } else {
       // First tap — enter confirm state
       btn.dataset.origHtml = btn.innerHTML;
