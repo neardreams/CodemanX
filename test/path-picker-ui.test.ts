@@ -44,6 +44,8 @@ function loadKeyboardModule() {
     clearTerminalInput: vi.fn(),
     insertTerminalText: vi.fn(),
     sendInput: vi.fn(),
+    // Special keys go through the durable exactly-once layer (no bare fetch).
+    _sendInputAsync: vi.fn(),
   };
   const fetchMock = vi.fn(() => Promise.resolve({ ok: true }));
   const context = vm.createContext({
@@ -86,10 +88,8 @@ describe('accessory Tab key', () => {
     bar.handleAction('tab');
 
     expect(app.sendInput).not.toHaveBeenCalled();
-    expect(fetchMock).toHaveBeenCalledOnce();
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe('/api/sessions/session-1/input');
-    expect(JSON.parse(init.body)).toEqual({ input: '\t' });
+    expect(app._sendInputAsync).toHaveBeenCalledWith('session-1', '\t');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('flushes locally-buffered prompt text to the PTY before sending Tab', () => {
@@ -115,12 +115,12 @@ describe('accessory Tab key', () => {
     expect((app as { _flushedOffsets: Map<string, number> })._flushedOffsets.has('session-1')).toBe(false);
     expect((app as { _flushedTexts: Map<string, string> })._flushedTexts.has('session-1')).toBe(false);
     expect(app.sendInput).toHaveBeenCalledWith('git sta');
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ input: '\t' });
+    expect(app._sendInputAsync).toHaveBeenCalledWith('session-1', '\t');
+    expect(fetchMock).not.toHaveBeenCalled();
     // Text must reach the PTY before the completion request.
     const sendInputOrder = (app.sendInput as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
-    const fetchOrder = fetchMock.mock.invocationCallOrder[0];
-    expect(sendInputOrder).toBeLessThan(fetchOrder);
+    const tabOrder = (app._sendInputAsync as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(sendInputOrder).toBeLessThan(tabOrder);
   });
 });
 

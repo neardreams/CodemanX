@@ -159,6 +159,8 @@ function loadBar(sessionMode = 'claude') {
     activeSessionId: 'session-1',
     sessions: new Map<string, { mode: string }>([['session-1', { mode: sessionMode }]]),
     terminal: { focus: vi.fn() },
+    // Special keys go through the durable exactly-once layer (no bare fetch).
+    _sendInputAsync: vi.fn(),
   };
   const fetchMock = vi.fn(() => Promise.resolve({ ok: true, catch: () => {} }));
   const barElement = fakeBarElement();
@@ -594,8 +596,10 @@ describe('composer nav keys from the bar', () => {
     return { ...loaded, app, overlay };
   }
 
-  const sentKeys = (fetchMock: { mock: { calls: unknown[][] } }) =>
-    fetchMock.mock.calls.map((call) => JSON.parse((call[1] as { body: string }).body).input);
+  // Special keys travel through the durable exactly-once layer, so the recorded
+  // sequences come from `_sendInputAsync` (no bare fetch to swallow failures).
+  const sentKeys = (app: { _sendInputAsync: { mock: { calls: unknown[][] } } }) =>
+    app._sendInputAsync.mock.calls.map((call) => call[1]);
 
   it.each(['simple', 'extended'])('exposes Shift arrows in the %s agent layout', (mode) => {
     const { bar, barElement } = loadBar('codex');
@@ -608,19 +612,19 @@ describe('composer nav keys from the bar', () => {
     ['shift-left', '\x1b[1;2D'],
     ['shift-right', '\x1b[1;2C'],
   ])('%s flushes the draft before navigation and hands editing to the PTY', (action, sequence) => {
-    const { bar, app, overlay, fetchMock } = barWithDraft('unfinished follow-up');
+    const { bar, app, overlay } = barWithDraft('unfinished follow-up');
     const events: string[] = [];
     app.sendInput = vi.fn(() => events.push('draft'));
-    fetchMock.mockImplementation(() => {
+    app._sendInputAsync = vi.fn(() => {
       events.push('key');
-      return Promise.resolve({ ok: true, catch: () => {} });
+      return Promise.resolve();
     });
 
     bar.handleAction(action);
 
     expect(app.sendInput).toHaveBeenCalledWith('unfinished follow-up');
     expect(events).toEqual(['draft', 'key']);
-    expect(sentKeys(fetchMock)).toEqual([sequence]);
+    expect(sentKeys(app)).toEqual([sequence]);
     expect(overlay.pendingText).toBe('');
     expect([...(app._echoPassthroughSessions as Set<string>)]).toEqual(['session-1']);
   });
@@ -632,12 +636,12 @@ describe('composer nav keys from the bar', () => {
     // goes on painting the draft over the same row and still believes it is
     // pending. Flushing first is also what makes the draft recoverable: the
     // CLI stashes the live composer and hands it back on Down.
-    const { bar, app, overlay, fetchMock } = barWithDraft('draft I typed');
+    const { bar, app, overlay } = barWithDraft('draft I typed');
 
     bar.handleAction('scroll-up');
 
     expect(app.sendInput).toHaveBeenCalledWith('draft I typed');
-    expect(sentKeys(fetchMock)).toEqual(['\x1b[A']);
+    expect(sentKeys(app)).toEqual(['\x1b[A']);
     expect(overlay.pendingText).toBe('');
     expect(overlay.suppressBufferDetection).toHaveBeenCalled();
     // The overlay's bookkeeping for this session has to go with it.
@@ -657,14 +661,14 @@ describe('composer nav keys from the bar', () => {
   });
 
   it('sends all four arrows and skips the flush when there is no draft', () => {
-    const { bar, app, fetchMock } = barWithDraft('');
+    const { bar, app } = barWithDraft('');
 
     bar.handleAction('scroll-up');
     bar.handleAction('scroll-down');
     bar.handleAction('arrow-left');
     bar.handleAction('arrow-right');
 
-    expect(sentKeys(fetchMock)).toEqual(['\x1b[A', '\x1b[B', '\x1b[D', '\x1b[C']);
+    expect(sentKeys(app)).toEqual(['\x1b[A', '\x1b[B', '\x1b[D', '\x1b[C']);
     expect(app.sendInput).not.toHaveBeenCalled();
   });
 });
