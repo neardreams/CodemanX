@@ -256,6 +256,28 @@
     return COMPOSER_NAV_KEY_PATTERN.test(data);
   }
 
+  /**
+   * Drafts the CLI answers with its OWN picker, so they must reach the PTY as
+   * they are typed rather than being held by the local-echo overlay: a slash
+   * command (`/`, `/model`) or an @-mention at a word boundary (`@`,
+   * `see @src/index`). Claude Code, opencode and gemini filter a command list
+   * on every keystroke and Claude Code opens a file picker on `@`; while the
+   * text is buffered locally the CLI sees nothing, so the menu never opens and
+   * the ↓/↑ keys that would drive it look dead (fork issue #1).
+   *
+   * Whitespace after the trigger ends the menu: `/model so` and `@src/a b` are
+   * ordinary prose as far as the picker is concerned. A `@` inside a word is an
+   * email address/handle, not a mention — the CLI only opens its picker at a
+   * word boundary.
+   */
+  function isComposerMenuDraft(draft) {
+    if (draft.startsWith('/')) return !/\s/.test(draft.slice(1));
+    const at = draft.lastIndexOf('@');
+    if (at === -1) return false;
+    if (at > 0 && !/\s/.test(draft[at - 1])) return false;
+    return !/\s/.test(draft.slice(at + 1));
+  }
+
   // Codex composer-row signature, measured against codex-cli 0.147.0
   // (docs/predictive-echo-plan.md): the composer's cursor row starts with
   // "› " (U+203A + space) when empty (placeholder text), while typing, and
@@ -375,6 +397,7 @@
     shouldSuppressTerminalQueryResponse,
     isTerminalFocusOrMouseReport,
     isComposerNavKey,
+    isComposerMenuDraft,
     classifyPredictInput,
     isCodexComposerRow,
     cursorViewportRow,
@@ -1926,6 +1949,28 @@ Object.assign(CodemanApp.prototype, {
             return;
           }
           if (data.length === 1 && data.charCodeAt(0) >= 32) {
+            // A draft the CLI answers with its own picker (slash command or
+            // @-mention) goes to the PTY as it is typed, and the session then
+            // stays in plain PTY echo until Enter/Ctrl+C — the same hand-off a
+            // composer nav key does. Held in the overlay instead, the CLI never
+            // sees the characters, so its picker never opens and ↓/↑ have
+            // nothing to move (fork issue #1).
+            const menuDraft = (this._localEchoOverlay?.pendingText || '') + data;
+            if (!isImeCommit && window.CodemanTerminalInput.isComposerMenuDraft(menuDraft)) {
+              this._localEchoOverlay?.clear();
+              this._localEchoOverlay?.suppressBufferDetection();
+              this._flushedOffsets?.delete(this.activeSessionId);
+              this._flushedTexts?.delete(this.activeSessionId);
+              if (!this._echoPassthroughSessions) this._echoPassthroughSessions = new Set();
+              this._echoPassthroughSessions.add(this.activeSessionId);
+              if (this._inputFlushTimeout) {
+                clearTimeout(this._inputFlushTimeout);
+                this._inputFlushTimeout = null;
+              }
+              this._pendingInput += menuDraft;
+              flushInput();
+              return;
+            }
             // Printable char: add to overlay only (sent on Enter)
             this._localEchoOverlay?.addChar(data);
             if (isImeCommit && this._localEchoOverlay) this._transferMobileImeCommitToLocalEcho();

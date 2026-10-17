@@ -175,6 +175,33 @@ describe('CodemanTerminalInput.isComposerNavKey', () => {
   });
 });
 
+describe('CodemanTerminalInput.isComposerMenuDraft', () => {
+  const isComposerMenuDraft = terminalInput.isComposerMenuDraft as (draft: string) => boolean;
+
+  it.each([
+    '/', // the picker opens on the trigger alone
+    '/m',
+    '/model', // filtering the picker as you type
+    '@', // file mention
+    'see @src/ind', // a mention mid-draft, at a word boundary
+    '//',
+  ])('hands the draft %j to the PTY as it is typed', (draft) => {
+    expect(isComposerMenuDraft(draft)).toBe(true);
+  });
+
+  it.each([
+    '',
+    'hello world',
+    '/model now', // whitespace ends the picker
+    '/ model',
+    'marco@example.com', // mid-word @ is an address, not a mention
+    'a@',
+    'see @src/a b', // whitespace after the mention ends it
+  ])('keeps the draft %j in the local-echo overlay', (draft) => {
+    expect(isComposerMenuDraft(draft)).toBe(false);
+  });
+});
+
 describe('_updateLocalEchoState mode gating', () => {
   it('disables the overlay for codex sessions even with the setting ON (issues #218/#219/#220/#222)', () => {
     const overlay = makeOverlay('pending');
