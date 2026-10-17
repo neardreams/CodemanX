@@ -420,12 +420,19 @@ export function buildDownstreamResponseHeaders(
  * (already handled by `<base>`) and cross-origin URLs are passed through. Every
  * rewrite is idempotent, so a value that passes through two layers is unchanged by
  * the second.
+ *
+ * With `targetOrigin` given, an ABSOLUTE URL naming that exact host:port is also
+ * rewritten (see `rw()`): a dashboard that hardcodes `http://localhost:5173/...`
+ * or `ws://localhost:5173/live` is otherwise broken for every remote client — the
+ * name resolves to the *viewer's* machine, and an http/ws absolute is blocked as
+ * mixed content when Codeman itself is served over HTTPS.
  */
-export function runtimeUrlShim(prefix: string): string {
+export function runtimeUrlShim(prefix: string, targetOrigin = ''): string {
   // Kept dependency-free and defensive: it runs inside a page we do not control,
   // and a throw here would break the dashboard rather than fix it.
   return `<script>(function(){try{
 var P=${JSON.stringify(prefix)};
+var T=${JSON.stringify(targetOrigin)};
 // Route masking. A single-page app reads location.pathname on boot and routes
 // on it; through the proxy that path starts with /webview/<cap>/, which no app
 // has a route for, so it rendered its own "page not found" the moment its
@@ -441,6 +448,21 @@ try{
     history.replaceState(history.state,'',L.slice(P.length-1)+location.search+location.hash);
   }
 }catch(e){}
+function isTargetHost(u){
+  try{
+    if(!T)return false;
+    var t=new URL(T);
+    if(u.host!==t.host)return false;
+    var s=u.protocol;
+    return s==='http:'||s==='https:'||s==='ws:'||s==='wss:';
+  }catch(e){return false;}
+}
+function rebase(u){
+  var p=u.protocol;
+  var secure=location.protocol==='https:';
+  var scheme=(p==='ws:'||p==='wss:')?(secure?'wss:':'ws:'):(secure?'https:':'http:');
+  return scheme+'//'+location.host+P+u.pathname.replace(/^\\//,'')+u.search+u.hash;
+}
 function rw(u){
   try{
     if(u==null)return u;
@@ -452,7 +474,14 @@ function rw(u){
     if(u.charAt(0)==='/'&&u.charAt(1)!=='/')return P+u.slice(1);
     if(/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u)||u.indexOf('//')===0){
       var a=new URL(u,location.href);
-      if(a.host===location.host&&a.pathname.indexOf(P)!==0){
+      if(a.pathname.indexOf(P)===0)return u;
+      // An ABSOLUTE URL naming the dashboard's own host. It can only work for a
+      // browser running on the box itself: from a remote device "localhost" is
+      // that device, and on an HTTPS page the plain http:// or ws:// form is
+      // mixed content (dev servers and HMR sockets are the usual source). Point
+      // it back at the proxy, same-origin, with the page's own scheme.
+      if(isTargetHost(a))return rebase(a);
+      if(a.host===location.host){
         a.pathname=P+a.pathname.replace(/^\\//,'');
         return a.href;
       }
@@ -626,26 +655,52 @@ try{
 }
 
 /**
+ * `host:port` of an http(s) origin, or '' when the value is not one. Used to
+ * recognise a dashboard URL that names its own host in absolute form.
+ */
+function hostOfOrigin(origin: string): string {
+  try {
+    return new URL(origin).host;
+  } catch {
+    return '';
+  }
+}
+
+/**
  * Inject `<base href="/webview/<cap>/">` plus the runtime URL shim, and rebase
  * root-absolute `src`/`href`/`action` attributes, which `<base>` alone does not
- * affect.
+ * affect. When the dashboard's own origin is passed, absolute attributes naming
+ * that same host:port are rebased into the prefix as well.
  *
  * Three layers, because no single one is sufficient: `<base>` for parser-resolved
  * relative URLs, attribute rewriting for root-absolute markup, and the shim for
  * URLs built at runtime.
  */
-export function rewriteHtml(html: string, capability: string, basePath = ''): string {
+export function rewriteHtml(html: string, capability: string, basePath = '', targetOrigin = ''): string {
   const prefix = proxyPrefixFor(capability, basePath);
 
   // Fresh regexes per call: module-level /g patterns carry `lastIndex` between calls.
-  const rebased = html
+  let rebased = html
     .replace(/(\s(?:src|href|action)\s*=\s*")\/(?!\/)/gi, `$1${prefix}`)
     .replace(/(\s(?:src|href|action)\s*=\s*')\/(?!\/)/gi, `$1${prefix}`);
+
+  // Absolute attributes naming the dashboard's OWN host are the same trap the
+  // runtime shim closes for script-built URLs (see rw()): `http://localhost:5173/`
+  // resolves only for a browser on the box itself, and it is mixed content on an
+  // HTTPS page — while the same document is fine when the page is opened locally.
+  // Only this exact host:port is rebased; every cross-origin URL stays untouched.
+  const targetHost = hostOfOrigin(targetOrigin);
+  if (targetHost) {
+    const host = targetHost.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    rebased = rebased
+      .replace(new RegExp(`(\\s(?:src|href|action)\\s*=\\s*")https?://${host}/`, 'gi'), `$1${prefix}`)
+      .replace(new RegExp(`(\\s(?:src|href|action)\\s*=\\s*')https?://${host}/`, 'gi'), `$1${prefix}`);
+  }
 
   // A page that ships its own <base> keeps it (overriding it would break the
   // author's intent), but it STILL needs the shim, which is the layer that
   // catches runtime-built URLs. So only the base tag is conditional.
-  const injected = (/<base\b/i.test(rebased) ? '' : `<base href="${prefix}">`) + runtimeUrlShim(prefix);
+  const injected = (/<base\b/i.test(rebased) ? '' : `<base href="${prefix}">`) + runtimeUrlShim(prefix, targetOrigin);
 
   const headMatch = /<head\b[^>]*>/i.exec(rebased);
   if (headMatch) {

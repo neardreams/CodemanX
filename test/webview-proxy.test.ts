@@ -346,6 +346,29 @@ describe('rewriteHtml', () => {
     expect(out).toContain('src="https://a/b.png"');
   });
 
+  it("rebases absolute attributes naming the dashboard's own host", () => {
+    const out = rewriteHtml(
+      `<head></head><body><script src="http://localhost:5173/@vite/client"></script>` +
+        `<link href='https://localhost:5173/app.css'></body>`,
+      CAP,
+      '',
+      'http://localhost:5173'
+    );
+    expect(out).toContain(`src="${PREFIX}@vite/client"`);
+    expect(out).toContain(`href='${PREFIX}app.css'`);
+  });
+
+  it('leaves absolute attributes for any OTHER host untouched', () => {
+    const out = rewriteHtml(
+      '<head></head><img src="http://localhost:9999/a.png"><img src="http://other.local:5173/b.png">',
+      CAP,
+      '',
+      'http://localhost:5173'
+    );
+    expect(out).toContain('src="http://localhost:9999/a.png"');
+    expect(out).toContain('src="http://other.local:5173/b.png"');
+  });
+
   it('is stable across repeated calls (no shared regex lastIndex)', () => {
     const html = '<head></head><script src="/a.js"></script>';
     expect(rewriteHtml(html, CAP)).toBe(rewriteHtml(html, CAP));
@@ -401,7 +424,7 @@ describe('runtimeUrlShim', () => {
    * Execute the shim against a fake window and return the patched globals, so the
    * rewrite logic is tested for real rather than by reading the source.
    */
-  function runShim(host = 'codeman.local') {
+  function runShim(host = 'codeman.local', targetOrigin = '', protocol = 'https:') {
     const calls: string[] = [];
     const win: Record<string, unknown> = {
       fetch: (input: unknown) => {
@@ -429,8 +452,16 @@ describe('runtimeUrlShim', () => {
         calls.push(u);
       },
     };
-    const location = { href: `https://${host}${PREFIX}page`, host };
-    new Function('window', 'location', 'URL', 'Request', `with (window) { ${body} }`)(win, location, URL, undefined);
+    const location = { href: `${protocol}//${host}${PREFIX}page`, host, protocol };
+    const shimBody = runtimeUrlShim(PREFIX, targetOrigin)
+      .replace(/^<script>/, '')
+      .replace(/<\/script>$/, '');
+    new Function('window', 'location', 'URL', 'Request', `with (window) { ${shimBody} }`)(
+      win,
+      location,
+      URL,
+      undefined
+    );
     return { win, calls };
   }
 
@@ -462,6 +493,42 @@ describe('runtimeUrlShim', () => {
     const { win, calls } = runShim();
     (win.fetch as (u: string) => void)('https://codeman.local/api/data');
     expect(calls[0]).toBe(`https://codeman.local${PREFIX}api/data`);
+  });
+
+  it('re-points an ABSOLUTE URL naming the dashboard OWN host at the proxy', () => {
+    // The remote-client trap: http://localhost:5173/… resolves to the VIEWER's
+    // machine and is mixed content when Codeman is served over HTTPS.
+    const { win, calls } = runShim('codeman.local', 'http://localhost:5173');
+    (win.fetch as (u: string) => void)('http://localhost:5173/api/data');
+    expect(calls[0]).toBe(`https://codeman.local${PREFIX}api/data`);
+  });
+
+  it('maps a dashboard WebSocket onto the page scheme (ws to wss on HTTPS)', () => {
+    const { win, calls } = runShim('codeman.local', 'http://localhost:5173');
+    new (win.WebSocket as new (u: string) => unknown)('ws://localhost:5173/live?x=1');
+    expect(calls[0]).toBe(`wss://codeman.local${PREFIX}live?x=1`);
+  });
+
+  it('keeps the plain schemes when the Codeman page itself is HTTP', () => {
+    const { win, calls } = runShim('codeman.local', 'http://localhost:5173', 'http:');
+    (win.fetch as (u: string) => void)('http://localhost:5173/api/data');
+    new (win.WebSocket as new (u: string) => unknown)('ws://localhost:5173/live');
+    expect(calls[0]).toBe(`http://codeman.local${PREFIX}api/data`);
+    expect(calls[1]).toBe(`ws://codeman.local${PREFIX}live`);
+  });
+
+  it('leaves the target HOST on a different port alone', () => {
+    // A different port is a different service; guessing would be worse than the
+    // dashboard author's own URL.
+    const { win, calls } = runShim('codeman.local', 'http://localhost:5173');
+    (win.fetch as (u: string) => void)('http://localhost:9999/api/data');
+    expect(calls[0]).toBe('http://localhost:9999/api/data');
+  });
+
+  it('leaves a cross-origin host alone when a target origin is known', () => {
+    const { win, calls } = runShim('codeman.local', 'http://localhost:5173');
+    (win.fetch as (u: string) => void)('https://cdn.example/lib.js');
+    expect(calls[0]).toBe('https://cdn.example/lib.js');
   });
 
   it('patches XMLHttpRequest.open', () => {
